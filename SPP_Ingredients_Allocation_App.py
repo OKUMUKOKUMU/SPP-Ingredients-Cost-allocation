@@ -4,46 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # JSON key file contents as a dictionary
-json_key = {
-  "type": "service_account",
-  "project_id": "tracker-419810",
-  "private_key_id": "1db0cd4dcda19da909eb0c1045284abb4b5c06b4",
-  "private_key": """-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDH21Yt6KRhdCBT
-mV1b9IHlspRJ7CySyIAnDfrd4tCRIadsZpV96LwPLc0Z4pSkmtcAm9+a3JC5tqnC
-b97oIADFZ4oJtWuemWf1TYHoqI6RqzwERc66viD0HB//9nvviiCDxXFB39W1v4FL
-kjsVciqmglmyNYy+xmvkY4n5gwBNGyIps//yGSxFmczblxhCwc8Pfrh8qJhH/p6W
-6rko4gWJblIhjOYiz5DS2d2XSNFiodPNPsgtzU3hmg3Lvi3w+WzeVJeiU7A/Xk/1
-pB4hXJwHPi23p8hMpZWIBgZMKfe++Cg2rIiSNYt0PKcO7KkcuOdCAkDyGgEPBmzy
-5nRnPj27AgMBAAECggEAQHTQdAj6bwXFYUDut7gBZuPz6G13qLVqg24CUSqUKqKI
-fTEOmKeFc33JjsYhO39GxUcAVFE7ifHMCU4MPaAIr6Hnhp8QwPtn6Fjhg3hNVtS7
-jAM5m8ezGBe0CFjl+sj5GJaGowC+S5oiaI2WaaHC+KXEqPGVXXfgFy41MxgZckQy
-QyOvc9ikBkSWMOMo00XwCpzureOCrh2Dqeox84Lj8mpj2mQWu2YSPC4y39M3dMBf
-nS0QYlRyTE80CK3gn9XjOwBhp2PUklva9i8EPQzSOkf22M1a/+lSQ/VJh5K0U7ni
-76LKiG9UHIMC0K2tmBJ9Mz0huXhkYlscRC2bd1UzVQKBgQDx2+eUQe4t3aPqhlwH
-cgW8M4+UwfJr9vWP9KaebJ9WxaV+DJK7DeuVgTsHn7Q57Qqj/ZJdrcI+DCAvcNvo
-fftFlOOfM3jQ4pJQx4qdcSfeG6f206evisIDkNxlbv1yR5/YZ69Oc/JmAdXtxL9R
-klCsBOQTMgqin+fslABb6IpQ/QKBgQDTisBkf9vuCcWpY82Pj0FfLLUs3R/2XPzB
-GfGmNji+2HFrtirKF0LCtiYWSUkCy0b3Wgk1nx4yZdFcFRvxml++OxyaqqgsVh/J
-vhiyvUMDICS1JXZBWkygFye4jmVxFTy5q8ibAN/zUwfFD2F2KYSpEkZMoL5iq5Aa
-JN95kLYDFwKBgQC4tJpc7ST6viOqvcWWogujOTVUA/IhZc8Pi2Wb45Skbfj/FJcS
-Z4Uc/j6YiezXuCHCL6sSA9suC5Cg6m3nVh8JerWDJYoE7KOVMW644mvyAej6ZZXQ
-SAX3NzA5/tNr7Ssz16tYHNBn+srn9LOvljApzupnhnX80GYMlNLZXfQT+QKBgC0S
-x2Oiiq3xjxhEl6wbDgbFc+UXSJQpxAExEfgkXXrsi14z9nIQ+ryaKwtcmh3qSjiy
-CnxOZxS99Rn1tXqJNhVGaxXZfvPTdfp6crDC+uBTnP6r+MJ8Bw+lX2VHkf3CVKoL
-HDdKvG0QJ/upB08yEX4k0q3JIkfL3mxzpto0J1QJAoGAOJJhiONVmx5oYYVA/I02
-6KaJ95WvcdN9eUNoizHl1wGoJhd+FLEoDnU6ZSxxJ0z2ag2HBWjGfi07Y8xO2gMR
-WLW42xnowTqey/aNml760mE7rCgQz1RJ7hCrUeV693EkDplxOcvU36YdObGfO7in
-4Rx1mTv7WKclb+7boAfx1Z4=
------END PRIVATE KEY-----""",
-  "client_email": "spp-ing@tracker-419810.iam.gserviceaccount.com",
-  "client_id": "101889874987074189201",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/spp-ing%40tracker-419810.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-    }
+
     
 import pandas as pd
 import streamlit as st
