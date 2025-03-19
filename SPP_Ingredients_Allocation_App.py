@@ -737,7 +737,6 @@ elif view_mode == "Data Overview":
         
         # Multiple visualizations using tabs
         chart_tab1, chart_tab2, chart_tab3 = st.tabs(["🥧 Department Distribution", "📈 Usage Trends", "🔝 Top Items"])
-        
         with chart_tab1:
     # Department distribution pie chart
     dept_usage = filtered_data.groupby("DEPARTMENT")["QUANTITY"].sum().reset_index()
@@ -821,3 +820,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+        
+        
+       
