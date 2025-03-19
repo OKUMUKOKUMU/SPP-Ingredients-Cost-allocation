@@ -4,56 +4,22 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 import os
-import time
-import plotly.express as px
-import numpy as np
 from datetime import datetime
+import plotly.express as px
 
 # Load environment variables
 load_dotenv()
 
-# Configure page
-st.set_page_config(page_title="SPP Ingredients Allocation App", layout="wide")
-
-# Add custom CSS
-st.markdown("""
-<style>
-    .main-header {text-align: center; color: #FFC300; margin-bottom: 20px;}
-    .sub-header {margin-top: 15px; margin-bottom: 10px;}
-    .highlight {background-color: #f0f2f6; padding: 10px; border-radius: 5px;}
-    .footer {text-align: center; color: #888; font-size: 0.8em;}
-    .stAlert {margin-top: 20px;}
-</style>
-""", unsafe_allow_html=True)
-
-# Function to validate Google credentials
-def validate_google_credentials():
-    required_env_vars = [
-        "GOOGLE_PROJECT_ID", "GOOGLE_PRIVATE_KEY_ID", "GOOGLE_PRIVATE_KEY",
-        "GOOGLE_CLIENT_EMAIL", "GOOGLE_CLIENT_ID", "GOOGLE_AUTH_URI", 
-        "GOOGLE_TOKEN_URI", "GOOGLE_AUTH_PROVIDER_X509_CERT_URL", "GOOGLE_CLIENT_X509_CERT_URL"
-    ]
+def connect_to_gsheet(spreadsheet_name, sheet_name):
+    """
+    Authenticate and connect to Google Sheets.
+    """
+    scope = ["https://spreadsheets.google.com/feeds", 
+             "https://www.googleapis.com/auth/spreadsheets",
+             "https://www.googleapis.com/auth/drive.file", 
+             "https://www.googleapis.com/auth/drive"]
     
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        st.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
-        st.info("Please set all required environment variables for Google Sheets access.")
-        return False
-    return True
-
-# Cache function for Google Sheets connection with error handling
-@st.cache_data(ttl=3600)
-def load_data_from_google_sheet():
-    if not validate_google_credentials():
-        return pd.DataFrame()
-        
     try:
-        scope = ["https://spreadsheets.google.com/feeds", 
-                'https://www.googleapis.com/auth/spreadsheets',
-                "https://www.googleapis.com/auth/drive.file", 
-                "https://www.googleapis.com/auth/drive"]
-        
         credentials = {
             "type": "service_account",
             "project_id": os.getenv("GOOGLE_PROJECT_ID"),
@@ -69,399 +35,789 @@ def load_data_from_google_sheet():
 
         client_credentials = ServiceAccountCredentials.from_json_keyfile_dict(credentials, scope)
         client = gspread.authorize(client_credentials)
-        
-        try:
-            worksheet = client.open("BROWNS STOCK MANAGEMENT").worksheet("CHECK_OUT")
-        except gspread.exceptions.SpreadsheetNotFound:
-            st.error("❌ Spreadsheet 'BROWNS STOCK MANAGEMENT' not found!")
-            return pd.DataFrame()
-        except gspread.exceptions.WorksheetNotFound:
-            st.error("❌ Worksheet 'CHECK_OUT' not found!")
-            return pd.DataFrame()
-        
-        data = worksheet.get_all_records()
-        if not data:
-            st.warning("⚠️ No data found in the spreadsheet!")
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(data)
-
-        # Standardize column names and handle potential missing columns
-        expected_columns = ["DATE", "ITEM_SERIAL", "ITEM NAME", "ISSUED_TO", "QUANTITY", 
-                          "UNIT_OF_MEASURE", "ITEM_CATEGORY", "WEEK", "REFERENCE", 
-                          "DEPARTMENT_CAT", "BATCH NO.", "STORE", "RECEIVED BY"]
-        
-        # Check if all expected columns are present
-        missing_columns = [col for col in expected_columns if col not in df.columns]
-        if missing_columns:
-            st.warning(f"⚠️ Missing columns in spreadsheet: {', '.join(missing_columns)}")
-            # Add missing columns with NaN values
-            for col in missing_columns:
-                df[col] = np.nan
-        
-        # Ensure column order matches expected order
-        df = df[expected_columns]
-        
-        # Data cleaning and transformation
-        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-        df["QUANTITY"] = pd.to_numeric(df["QUANTITY"], errors="coerce")
-        
-        # Drop rows with missing quantities
-        df.dropna(subset=["QUANTITY"], inplace=True)
-        
-        # Fill missing department categories
-        if df["DEPARTMENT_CAT"].isna().any():
-            df["DEPARTMENT_CAT"].fillna("Unspecified", inplace=True)
-            
-        # Add quarter and year columns for potential filtering
-        df["QUARTER"] = df["DATE"].dt.to_period("Q")
-        df["YEAR"] = df["DATE"].dt.year
-        
-        # Filter for recent data (current year)
-        current_year = datetime.now().year
-        recent_data = df[df["YEAR"] >= current_year - 1]
-        
-        if recent_data.empty:
-            st.warning(f"⚠️ No data found for {current_year} or {current_year-1}. Showing all available data instead.")
-            return df
-        
-        return recent_data
-        
+        spreadsheet = client.open(spreadsheet_name)  
+        return spreadsheet.worksheet(sheet_name)  # Access specific sheet by name
     except Exception as e:
-        st.error(f"❌ Error loading data: {str(e)}")
-        return pd.DataFrame()
-
-@st.cache_data
-def calculate_proportion(df, identifier):
-    """Calculate proportional usage by department for a specific item"""
-    if df.empty:
-        return None
-        
-    identifier = str(identifier).lower()
-    # Improved search logic to handle partial matches
-    filtered_df = df[(df["ITEM_SERIAL"].astype(str).str.lower() == identifier) |
-                     (df["ITEM NAME"].str.lower() == identifier) |
-                     (df["ITEM NAME"].str.lower().str.contains(identifier))]
-
-    if filtered_df.empty:
+        st.error(f"Failed to connect to Google Sheets: {e}")
         return None
 
-    # Group by department and calculate total quantity
-    usage_summary = filtered_df.groupby("DEPARTMENT_CAT")["QUANTITY"].sum()
-    
-    # Calculate proportions
-    total_usage = usage_summary.sum()
-    if total_usage == 0:
-        return None
-        
-    proportions = (usage_summary / total_usage) * 100
-    proportions.sort_values(ascending=False, inplace=True)
-
-    result = proportions.reset_index()
-    # Ensure no null values
-    result = result.fillna(0)
-    
-    return result
-
-def allocate_quantity(df, item_quantities, min_threshold=5):
-    """Allocate quantities to departments based on historical usage patterns"""
-    if df.empty:
-        st.error("❌ No data available for allocation!")
-        return {}
-        
-    allocations = {}
-    
-    for item, quantity in item_quantities.items():
-        if quantity <= 0:
-            continue
+def load_data_from_google_sheet():
+    """
+    Load data from Google Sheets.
+    """
+    with st.spinner("Loading data from Google Sheets..."):
+        try:
+            worksheet = connect_to_gsheet(SPREADSHEET_NAME, SHEET_NAME)
+            if worksheet is None:
+                return None
             
-        proportions = calculate_proportion(df, item)
-        if proportions is None:
-            st.warning(f"⚠️ No usage data found for '{item}'.")
-            continue
-
-        # Create a copy to avoid modifying the original dataframe
-        allocation_df = proportions.copy()
-        allocation_df["Allocated Quantity"] = np.round((allocation_df["QUANTITY"] / 100) * quantity, 1)
-        
-        # Handle minimum threshold allocation
-        total_allocated = allocation_df["Allocated Quantity"].sum()
-        if total_allocated > 0:
-            # Identify departments that would receive less than the minimum threshold
-            min_quantity = (quantity * min_threshold / 100)
-            underallocated = allocation_df[allocation_df["Allocated Quantity"] < min_quantity].copy()
+            # Get all records from the Google Sheet
+            data = worksheet.get_all_records()
             
-            if not underallocated.empty and len(allocation_df) > len(underallocated):
-                # Calculate how much quantity needs to be reallocated
-                needed_reallocation = sum(min_quantity - row["Allocated Quantity"] 
-                                         for _, row in underallocated.iterrows())
-                
-                # Set underallocated departments to minimum threshold
-                for idx in underallocated.index:
-                    allocation_df.loc[idx, "Allocated Quantity"] = min_quantity
-                
-                # Calculate how much to reduce from other departments
-                overallocated = allocation_df[~allocation_df.index.isin(underallocated.index)]
-                if not overallocated.empty:
-                    total_over = overallocated["Allocated Quantity"].sum()
-                    reduction_factor = needed_reallocation / total_over
-                    
-                    # Reduce allocation proportionally from other departments
-                    for idx in overallocated.index:
-                        current = allocation_df.loc[idx, "Allocated Quantity"]
-                        allocation_df.loc[idx, "Allocated Quantity"] = max(0, current - (current * reduction_factor))
-                        
-            # Special case: if all departments would be under minimum threshold
-            elif len(underallocated) == len(allocation_df) and len(allocation_df) > 1:
-                # Distribute equally
-                equal_share = quantity / len(allocation_df)
-                allocation_df["Allocated Quantity"] = equal_share
-        
-        # Round allocated quantities to 1 decimal place for readability
-        allocation_df["Allocated Quantity"] = np.round(allocation_df["Allocated Quantity"], 1)
-        
-        # Check if allocation sum matches original quantity (adjust for rounding errors)
-        total_after_allocation = allocation_df["Allocated Quantity"].sum()
-        if abs(total_after_allocation - quantity) > 0.5:
-            # Adjust the largest allocation to compensate for rounding differences
-            idx_max = allocation_df["Allocated Quantity"].idxmax()
-            adjustment = quantity - total_after_allocation
-            allocation_df.loc[idx_max, "Allocated Quantity"] += adjustment
-            allocation_df.loc[idx_max, "Allocated Quantity"] = np.round(allocation_df.loc[idx_max, "Allocated Quantity"], 1)
-        
-        # Rename columns for better UI display
-        allocation_df.rename(columns={"DEPARTMENT_CAT": "Department", "QUANTITY": "Proportion (%)"}, inplace=True)
-        allocation_df["Proportion (%)"] = np.round(allocation_df["Proportion (%)"], 1)
-        
-        # Add to allocations dictionary
-        allocations[item] = allocation_df
+            if not data:
+                st.error("No data found in the Google Sheet.")
+                return None
 
-    return allocations
+            # Convert data to DataFrame
+            df = pd.DataFrame(data)
 
-# Sidebar UI
-st.sidebar.markdown("""
-    <h1 class='main-header'>SPP Ingredients Allocation App</h1>
+            # Ensure columns match the updated Google Sheets structure
+            df.columns = ["DATE", "ITEM_SERIAL", "ITEM NAME", "DEPARTMENT", "ISSUED_TO", "QUANTITY", 
+                        "UNIT_OF_MEASURE", "ITEM_CATEGORY", "WEEK", "REFERENCE", 
+                        "DEPARTMENT_CAT", "BATCH NO.", "STORE", "RECEIVED BY"]
+
+            # Convert date and numeric columns
+            df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+            df["QUANTITY"] = pd.to_numeric(df["QUANTITY"], errors="coerce")
+            df.dropna(subset=["QUANTITY"], inplace=True)
+            
+            # Extract quarter information
+            df["QUARTER"] = df["DATE"].dt.to_period("Q")
+
+            # Filter data for 2024 onwards
+            current_year = datetime.now().year
+            df = df[df["DATE"].dt.year >= current_year - 1]  # Data from last year onwards
+
+            return df
+        except Exception as e:
+            st.error(f"Error loading data: {e}")
+            return None
+
+@st.cache_data(ttl=3600)  # Cache data for 1 hour
+def get_cached_data():
+    return load_data_from_google_sheet()
+
+def calculate_proportion(df, identifier, department=None, min_proportion=1.0):
+    """
+    Calculate department-wise usage proportion without subdepartment details.
+    Ensures all departments sum to 100%.
+    Filters out departments with proportions less than min_proportion.
+    """
+    if df is None:
+        return None
+    
+    try:
+        if identifier.isnumeric():
+            filtered_df = df[df["ITEM_SERIAL"].astype(str).str.lower() == identifier.lower()]
+        else:
+            filtered_df = df[df["ITEM NAME"].str.lower() == identifier.lower()]
+
+        if filtered_df.empty:
+            return None
+
+        # If department is specified, filter by department
+        if department and department != "All Departments":
+            filtered_df = filtered_df[filtered_df["DEPARTMENT"] == department]
+            if filtered_df.empty:
+                return None
+
+        # Calculate department-level proportions only
+        dept_usage = filtered_df.groupby("DEPARTMENT")["QUANTITY"].sum().reset_index()
+        
+        # Calculate total across all departments
+        total_usage = dept_usage["QUANTITY"].sum()
+        
+        if total_usage == 0:
+            return None
+            
+        # Calculate each department's proportion of the total
+        dept_usage["PROPORTION"] = (dept_usage["QUANTITY"] / total_usage) * 100
+        
+        # Filter out departments with proportions less than min_proportion
+        significant_depts = dept_usage[dept_usage["PROPORTION"] >= min_proportion].copy()
+        
+        # If no departments meet the threshold, return the one with the highest proportion
+        if significant_depts.empty and not dept_usage.empty:
+            significant_depts = pd.DataFrame([dept_usage.iloc[dept_usage["PROPORTION"].idxmax()]])
+        
+        # Recalculate proportions to ensure they sum to 100%
+        total_proportion = significant_depts["PROPORTION"].sum()
+        significant_depts["PROPORTION"] = (significant_depts["PROPORTION"] / total_proportion) * 100
+        
+        # Calculate relative weights for sorting
+        significant_depts["QUANTITY_ABS"] = significant_depts["QUANTITY"].abs()
+        significant_depts["INTERNAL_WEIGHT"] = significant_depts["QUANTITY_ABS"] / significant_depts["QUANTITY_ABS"].sum()
+        
+        # Sort by proportion (descending)
+        significant_depts.sort_values(by=["PROPORTION"], ascending=[False], inplace=True)
+        
+        return significant_depts
+    except Exception as e:
+        st.error(f"Error calculating proportions: {e}")
+        return None
+
+def allocate_quantity(df, identifier, available_quantity, department=None):
+    """
+    Allocate quantity based on historical proportions at department level only.
+    Filters out departments with less than 1% proportion.
+    Ensures total allocation exactly matches available quantity.
+    """
+    proportions = calculate_proportion(df, identifier, department, min_proportion=1.0)
+    if proportions is None:
+        return None
+    
+    # Calculate allocated quantity for each department based on their proportion
+    proportions["ALLOCATED_QUANTITY"] = (proportions["PROPORTION"] / 100) * available_quantity
+    
+    # First calculate the sum of the non-rounded values
+    total_unrounded = proportions["ALLOCATED_QUANTITY"].sum()
+    
+    # Round allocated quantities to integers
+    proportions["ALLOCATED_QUANTITY"] = proportions["ALLOCATED_QUANTITY"].round(0).astype(int)
+    
+    # Get the total after rounding
+    allocated_sum = proportions["ALLOCATED_QUANTITY"].sum()
+    
+    # Adjust to ensure we match exactly the available quantity
+    if allocated_sum != available_quantity:
+        difference = int(available_quantity - allocated_sum)
+        
+        if difference > 0:
+            # Need to add some units - add to departments with largest fractional parts
+            # Sort by fractional part (descending)
+            fractional_parts = (proportions["PROPORTION"] / 100) * available_quantity - proportions["ALLOCATED_QUANTITY"]
+            indices = fractional_parts.sort_values(ascending=False).index[:difference].tolist()
+            for idx in indices:
+                proportions.at[idx, "ALLOCATED_QUANTITY"] += 1
+        elif difference < 0:
+            # Need to subtract some units - remove from departments with smallest fractional parts
+            # Sort by fractional part (ascending)
+            fractional_parts = (proportions["PROPORTION"] / 100) * available_quantity - (proportions["ALLOCATED_QUANTITY"] - 1)
+            indices = fractional_parts.sort_values(ascending=True).index[:-difference].tolist()
+            for idx in indices:
+                proportions.at[idx, "ALLOCATED_QUANTITY"] -= 1
+    
+    # Verify once more that the sum matches the available quantity exactly
+    final_sum = proportions["ALLOCATED_QUANTITY"].sum()
+    assert final_sum == available_quantity, f"Allocation error: {final_sum} != {available_quantity}"
+    
+    return proportions
+
+def generate_allocation_chart(result_df, item_name):
+    """
+    Generate a bar chart for allocation results.
+    """
+    # Create a summarized version for charting (by DEPARTMENT only)
+    chart_df = result_df.copy()
+    
+    # Create a bar chart
+    fig = px.bar(
+        chart_df, 
+        x="DEPARTMENT", 
+        y="ALLOCATED_QUANTITY",
+        text="ALLOCATED_QUANTITY",
+        title=f"Allocation for {item_name} by Department",
+        labels={
+            "DEPARTMENT": "Department",
+            "ALLOCATED_QUANTITY": "Allocated Quantity"
+        },
+        height=400,
+        color="DEPARTMENT",
+        color_discrete_sequence=px.colors.qualitative.Bold
+    )
+    
+    # Customize the layout
+    fig.update_layout(
+        title_font=dict(size=20, family="Arial", color="#333333"),
+        title_x=0.5,
+        legend_title_text='',
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(
+            title=dict(font=dict(size=14, family="Arial", color="#555555")),
+            tickfont=dict(size=12, family="Arial", color="#555555"),
+            gridcolor="rgba(220,220,220,0.5)"
+        ),
+        yaxis=dict(
+            title=dict(font=dict(size=14, family="Arial", color="#555555")),
+            tickfont=dict(size=12, family="Arial", color="#555555"),
+            gridcolor="rgba(220,220,220,0.5)"
+        )
+    )
+    
+    # Improve bar appearance
+    fig.update_traces(
+        textposition='outside',
+        textfont=dict(size=12, family="Arial", color="#333333"),
+        marker_line_width=1,
+        marker_line_color="rgba(0,0,0,0.2)",
+        opacity=0.85
+    )
+    
+    return fig
+
+# Streamlit UI
+st.set_page_config(
+    page_title="SPP Ingredients Allocation App", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Enhanced CSS with modern design elements
+st.markdown("""
+    <style>
+    /* Global styles */
+    * {
+        font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif;
+    }
+    
+    /* App header */
+    .title {
+        text-align: center;
+        font-size: 36px;
+        font-weight: 600;
+        color: #1E3A8A;
+        margin-bottom: 10px;
+        padding-top: 20px;
+        background: linear-gradient(90deg, #1E3A8A 0%, #3B82F6 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    
+    .subtitle {
+        text-align: center;
+        font-size: 18px;
+        color: #64748B;
+        margin-bottom: 30px;
+        font-weight: 400;
+    }
+    
+    /* Cards */
+    .card {
+        background-color: #FFFFFF;
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        margin-bottom: 24px;
+        border: 1px solid #F1F5F9;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    
+    .card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+    }
+    
+    /* Headers */
+    .header {
+        color: #1E3A8A;
+        font-size: 24px;
+        font-weight: 600;
+        margin-bottom: 16px;
+        border-bottom: 2px solid #F1F5F9;
+        padding-bottom: 8px;
+    }
+    
+    .subheader {
+        color: #334155;
+        font-size: 18px;
+        font-weight: 500;
+        margin: 16px 0 12px 0;
+    }
+    
+    /* Result styles */
+    .result-header {
+        background-color: #F1F5F9;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        border-left: 5px solid #3B82F6;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(90deg, #3B82F6 0%, #2563EB 100%);
+        color: white;
+        font-weight: 500;
+        border-radius: 8px;
+        padding: 8px 16px;
+        border: none;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        background: linear-gradient(90deg, #2563EB 0%, #1D4ED8 100%);
+        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        transform: translateY(-2px);
+    }
+    
+    /* Sidebar */
+    .sidebar .sidebar-content {
+        background: linear-gradient(180deg, #1E3A8A 0%, #0F172A 100%);
+        color: white;
+    }
+    
+    /* Metrics */
+    .metric-card {
+        background-color: #F8FAFC;
+        border-radius: 8px;
+        padding: 12px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+        border: 1px solid #E2E8F0;
+        text-align: center;
+    }
+    
+    .metric-value {
+        font-size: 24px;
+        font-weight: 600;
+        color: #1E3A8A;
+    }
+    
+    .metric-label {
+        font-size: 14px;
+        color: #64748B;
+        margin-top: 4px;
+    }
+    
+    /* Tables */
+    .dataframe {
+        border-radius: 8px !important;
+        overflow: hidden !important;
+    }
+    
+    /* Form elements */
+    .stSelectbox > div > div {
+        border-radius: 6px !important;
+    }
+    
+    .stNumberInput > div > div > input {
+        border-radius: 6px !important;
+    }
+    
+    /* Footer */
+    .footer {
+        text-align: center;
+        font-size: 14px;
+        color: #94A3B8;
+        margin-top: 40px;
+        padding-top: 20px;
+        border-top: 1px solid #E2E8F0;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0px 0px;
+        padding: 10px 16px;
+        background-color: #F1F5F9;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #3B82F6 !important;
+        color: white !important;
+    }
+    
+    /* Alerts */
+    .stAlert {
+        border-radius: 8px !important;
+    }
+    
+    /* Loading spinner */
+    .stSpinner > div {
+        border-color: #3B82F6 !important;
+    }
+    </style>
 """, unsafe_allow_html=True)
 
-# Loading data indicator in the main area instead of sidebar
-with st.spinner("Loading data..."):
-    data = load_data_from_google_sheet()
-
-if data.empty:
-    st.error("❌ Unable to load data. Please check your connection and credentials.")
-else:
-    # Show data statistics in the sidebar
-    st.sidebar.success(f"✅ Loaded {len(data):,} records")
-    unique_items_count = data["ITEM NAME"].nunique()
-    st.sidebar.info(f"📊 {unique_items_count} unique items available")
+# Sidebar
+with st.sidebar:
+    st.markdown("<h2 class='title'>SPP Ingredients</h2>", unsafe_allow_html=True)
+    st.markdown("<p class='subtitle'>Smart Allocation System</p>", unsafe_allow_html=True)
     
-    # Date range information
-    if not data["DATE"].empty:
-        min_date = data["DATE"].min().strftime("%b %Y")
-        max_date = data["DATE"].max().strftime("%b %Y")
-        st.sidebar.info(f"📅 Data range: {min_date} to {max_date}")
-
-    # Filtering options
-    st.sidebar.header("🔍 Item Selection")
+    # Google Sheet credentials and details
+    SPREADSHEET_NAME = 'BROWNS STOCK MANAGEMENT'
+    SHEET_NAME = 'CHECK_OUT'
     
-    # Option to filter by category first
-    categories = sorted(data["ITEM_CATEGORY"].dropna().unique().tolist())
-    if categories:
-        selected_category = st.sidebar.selectbox("Filter by Category (Optional):", 
-                                               ["All Categories"] + categories)
-        
-        if selected_category != "All Categories":
-            filtered_data = data[data["ITEM_CATEGORY"] == selected_category]
-        else:
-            filtered_data = data
-    else:
-        filtered_data = data
+    # Load the data
+    if "data" not in st.session_state:
+        st.session_state.data = get_cached_data()
     
-    # Get unique item names with sorting for better UX
-    unique_item_names = sorted(filtered_data["ITEM NAME"].dropna().unique().tolist())
+    data = st.session_state.data
     
-    # Search functionality for better user experience
-    search_term = st.sidebar.text_input("Search for items:", "")
-    if search_term:
-        matching_items = [item for item in unique_item_names 
-                         if search_term.lower() in item.lower()]
-        if not matching_items:
-            st.sidebar.warning(f"No items found matching '{search_term}'")
-    else:
-        matching_items = unique_item_names
+    if data is None:
+        st.error("Failed to load data from Google Sheets. Please check your connection and credentials.")
+        st.stop()
     
-    # Select items with limited selections for performance
-    max_selections = 10
-    selected_identifiers = st.sidebar.multiselect(
-        f"Select Items (max {max_selections}):", 
-        matching_items, 
-        max_selections=max_selections
-    )
-
-    # Enter quantities with validation
-    if selected_identifiers:
-        st.sidebar.subheader("📌 Enter Available Quantities")
-        
-        # Add option to set same quantity for all
-        use_same_qty = st.sidebar.checkbox("Use same quantity for all items")
-        
-        item_quantities = {}
-        if use_same_qty:
-            default_qty = st.sidebar.number_input(
-                "Quantity for all items:", 
-                min_value=0.0, 
-                max_value=10000.0,
-                step=0.1
-            )
-            for item in selected_identifiers:
-                item_quantities[item] = default_qty
-        else:
-            for item in selected_identifiers:
-                item_quantities[item] = st.sidebar.number_input(
-                    f"{item}:", 
-                    min_value=0.0, 
-                    max_value=10000.0,
-                    step=0.1, 
-                    key=item
-                )
-        
-        # Option to adjust minimum allocation threshold
-        st.sidebar.subheader("⚙️ Advanced Settings")
-        min_threshold = st.sidebar.slider(
-            "Minimum allocation threshold (%):", 
-            min_value=0, 
-            max_value=20, 
-            value=5,
-            help="Departments allocated less than this percentage will be adjusted"
+    # Extract unique item names and departments for auto-suggestions
+    unique_item_names = sorted(data["ITEM NAME"].unique().tolist())
+    unique_departments = sorted(["All Departments"] + data["DEPARTMENT"].unique().tolist())
+    
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='subheader'>Quick Stats</div>", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(
+            f"<div class='metric-card'>"
+            f"<div class='metric-value'>{len(unique_item_names)}</div>"
+            f"<div class='metric-label'>Total Items</div>"
+            f"</div>",
+            unsafe_allow_html=True
         )
-        
-        # Calculate button with loading indicator
-        if st.sidebar.button("🚀 Calculate Allocation", type="primary"):
-            if all(qty == 0 for qty in item_quantities.values()):
-                st.sidebar.error("Please enter at least one non-zero quantity")
-            else:
-                # Use the spinner in the main area instead of sidebar
-                with st.spinner("Calculating allocation..."):
-                    time.sleep(0.5)  # Brief pause for UX
-                    result = allocate_quantity(filtered_data, item_quantities, min_threshold)
-                    
-                    if result:
-                        # Main area results display
-                        st.markdown("<h2 class='main-header'>📊 Allocation Results</h2>", unsafe_allow_html=True)
-                        
-                        # Summary card
-                        summary_cols = st.columns([1, 1])
-                        with summary_cols[0]:
-                            st.info(f"📋 Items processed: {len(result)}")
-                        with summary_cols[1]:
-                            total_qty = sum(sum(table["Allocated Quantity"]) for table in result.values())
-                            st.info(f"📦 Total quantity allocated: {total_qty:,.1f}")
-                        
-                        # Use tabs for better organization when multiple items
-                        if len(result) > 1:
-                            tabs = st.tabs([f"{item}" for item in result.keys()])
-                            for i, (item, table) in enumerate(result.items()):
-                                with tabs[i]:
-                                    # Display allocation table
-                                    st.markdown(f"#### Allocation Table for {item}")
-                                    st.dataframe(
-                                        table,
-                                        use_container_width=True
-                                    )
-                                    
-                                    # Show visualization
-                                    display_cols = st.columns([2, 1])
-                                    with display_cols[0]:
-                                        fig_pie = px.pie(
-                                            table, 
-                                            names="Department", 
-                                            values="Allocated Quantity",
-                                            title=f"Quantity Allocation for {item}",
-                                            color_discrete_sequence=px.colors.qualitative.Set3
-                                        )
-                                        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-                                        st.plotly_chart(fig_pie, use_container_width=True)
-                                    
-                                    with display_cols[1]:
-                                        # Show bar chart of proportions
-                                        fig_bar = px.bar(
-                                            table, 
-                                            x="Department", 
-                                            y="Proportion (%)",
-                                            title="Historical Usage Pattern",
-                                            color="Proportion (%)",
-                                            color_continuous_scale="Blues",
-                                        )
-                                        fig_bar.update_layout(xaxis_tickangle=-45)
-                                        st.plotly_chart(fig_bar, use_container_width=True)
-                        else:
-                            # Simpler layout for single item
-                            for item, table in result.items():
-                                st.markdown(f"#### 🔹 Allocation for {item}")
-                                st.dataframe(
-                                    table,
-                                    use_container_width=True
-                                )
-                                
-                                # Create columns for charts
-                                col1, col2 = st.columns([1, 1])
-                                with col1:
-                                    fig = px.pie(
-                                        table, 
-                                        names="Department", 
-                                        values="Allocated Quantity",
-                                        title=f"Quantity Allocation",
-                                        color_discrete_sequence=px.colors.qualitative.Set3
-                                    )
-                                    fig.update_traces(textposition='inside', textinfo='percent+label')
-                                    st.plotly_chart(fig, use_container_width=True)
-                                
-                                with col2:
-                                    fig_bar = px.bar(
-                                        table, 
-                                        x="Department", 
-                                        y="Proportion (%)",
-                                        title="Historical Usage Pattern",
-                                        color="Proportion (%)",
-                                        color_continuous_scale="Blues"
-                                    )
-                                    fig_bar.update_layout(xaxis_tickangle=-45)
-                                    st.plotly_chart(fig_bar, use_container_width=True)
-                                
-                        # Option to download results
-                        st.markdown("### 📥 Download Results")
-                        for item, table in result.items():
-                            csv = table.to_csv(index=False)
-                            filename = f"{item.replace(' ', '_')}_allocation.csv"
-                            st.download_button(
-                                f"Download {item} allocation",
-                                csv,
-                                filename,
-                                "text/csv",
-                                key=f"download_{item}"
-                            )
-                    else:
-                        st.error("❌ No matching data found for the selected items!")
-
-    # Footer
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        "<p class='footer'>Developed by Brown's Data Team<br>©2025 | v2.0</p>", 
-        unsafe_allow_html=True
-    )
+    with col2:
+        st.markdown(
+            f"<div class='metric-card'>"
+            f"<div class='metric-value'>{len(unique_departments) - 1}</div>"  # Exclude "All Departments"
+            f"<div class='metric-label'>Departments</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
     
-    # Help section
-    with st.sidebar.expander("ℹ️ Help & Information"):
-        st.markdown("""
-        **How to use this app:**
-        1. Select items from the dropdown menu
-        2. Enter the available quantities for each item
-        3. Click 'Calculate Allocation' to see results
+    # Refresh data button
+    if st.button("↻ Refresh Data"):
+        st.session_state.data = load_data_from_google_sheet()
+        st.success("✅ Data refreshed successfully!")
+    
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='subheader'>Navigation</div>", unsafe_allow_html=True)
+    view_mode = st.radio("", ["Allocation Calculator", "Data Overview"])
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    st.markdown("<p class='footer'>Developed by Brown's Data Team<br>©2025</p>", unsafe_allow_html=True)
+
+# Main content
+st.markdown("<h1 class='title'>SPP Ingredients Allocation App</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>Efficiently allocate ingredients across departments based on historical usage patterns</p>", unsafe_allow_html=True)
+
+# Use tabs for a cleaner interface
+if view_mode == "Allocation Calculator":
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='header'>Allocation Calculator</div>", unsafe_allow_html=True)
+    
+    # Use tabs for allocation form
+    tab1, tab2 = st.tabs(["⚖️ Calculate Allocation", "📊 Recent Allocations"])
+    
+    with tab1:
+        with st.form("allocation_form"):
+            st.markdown("<div class='subheader'>Item Selection</div>", unsafe_allow_html=True)
+            
+            # Improved layout for department selection
+            selected_department = st.selectbox(
+                "Filter by Department (optional)",
+                unique_departments,
+                help="Select a department to filter allocation or use 'All Departments'"
+            )
+            
+            # Item selection with better visual separation
+            num_items = st.slider("Number of items to allocate", min_value=1, max_value=10, value=1)
+            
+            entries = []
+            for i in range(num_items):
+                st.markdown(f"<div class='subheader'>Item {i+1} Details</div>", unsafe_allow_html=True)
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    identifier = st.selectbox(
+                        "Select item", 
+                        unique_item_names, 
+                        key=f"item_{i}",
+                        help="Choose an item from the inventory"
+                    )
+                with col2:
+                    available_quantity = st.number_input(
+                        "Quantity:", 
+                        min_value=0.1, 
+                        step=0.1, 
+                        key=f"qty_{i}",
+                        help="Enter the quantity available for allocation"
+                    )
+
+                if identifier and available_quantity > 0:
+                    entries.append((identifier, available_quantity))
+
+            # Make the submit button more noticeable
+            submitted = st.form_submit_button("▶ Calculate Allocation")
+    
+    with tab2:
+        st.info("Recent allocations will appear here")
+        # This section could be enhanced to show recent allocations from a history
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Processing Allocation with improved visualization
+    if submitted:
+        if not entries:
+            st.warning("⚠️ Please enter at least one valid item and quantity!")
+        else:
+            for identifier, available_quantity in entries:
+                result = allocate_quantity(data, identifier, available_quantity, selected_department)
+                if result is not None:
+                    st.markdown("<div class='card'>", unsafe_allow_html=True)
+                    
+                    # Enhanced header with icon and styling
+                    st.markdown(
+                        f"<div class='result-header'>"
+                        f"<span style='font-size:24px;margin-right:10px;'>📊</span>"
+                        f"<h3 style='margin:0;color:#1E3A8A;font-size:20px;'>Allocation Results: {identifier}</h3>"
+                        f"</div>", 
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Split the view with tabs for better organization
+                    result_tab1, result_tab2 = st.tabs(["📋 Allocation Table", "📈 Visualization"])
+                    
+                    with result_tab1:
+                        # Format the output for better readability
+                        formatted_result = result[["DEPARTMENT", "PROPORTION", "ALLOCATED_QUANTITY"]].copy()
+                        formatted_result = formatted_result.rename(columns={
+                            "DEPARTMENT": "Department",
+                            "PROPORTION": "Proportion (%)",
+                            "ALLOCATED_QUANTITY": "Allocated Quantity"
+                        })
+                        
+                        # Format numeric columns
+                        formatted_result["Proportion (%)"] = formatted_result["Proportion (%)"].round(2)
+                        formatted_result["Allocated Quantity"] = formatted_result["Allocated Quantity"].astype(int)
+                        
+                        # Display the result with enhanced styling
+                        st.dataframe(
+                            formatted_result,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Department": st.column_config.TextColumn("Department", help="Department receiving allocation"),
+                                "Proportion (%)": st.column_config.NumberColumn("Proportion (%)", format="%.2f%%", help="Historical usage proportion"),
+                                "Allocated Quantity": st.column_config.NumberColumn("Allocated Quantity", format="%d", help="Allocated quantity based on proportion")
+                            }
+                        )
+                        
+                        # Summary statistics with cleaner presentation
+                        st.markdown("<div class='subheader'>Allocation Summary</div>", unsafe_allow_html=True)
+                        summary_cols = st.columns(3)
+                        with summary_cols[0]:
+                            st.markdown(
+                                f"<div class='metric-card'>"
+                                f"<div class='metric-value'>{formatted_result['Allocated Quantity'].sum():,.0f}</div>"
+                                f"<div class='metric-label'>Total Quantity</div>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                        with summary_cols[1]:
+                            st.markdown(
+                                f"<div class='metric-card'>"
+                                f"<div class='metric-value'>{formatted_result['Department'].nunique()}</div>"
+                                f"<div class='metric-label'>Departments</div>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                        with summary_cols[2]:
+                            st.markdown(
+                                f"<div class='metric-card'>"
+                                f"<div class='metric-value'>{formatted_result['Proportion (%)'].max():.1f}%</div>"
+                                f"<div class='metric-label'>Highest Proportion</div>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                        
+                        # Add a download button with icon
+                        csv = formatted_result.to_csv(index=False)
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            st.download_button(
+                                label="📥 Download CSV",
+                                data=csv,
+                                file_name=f"{identifier}_allocation.csv",
+                                mime="text/csv",
+                            )
+                    
+                    with result_tab2:
+                        # Enhanced visualization
+                        chart = generate_allocation_chart(result, identifier)
+                        st.plotly_chart(chart, use_container_width=True)
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    st.error(f"❌ Item '{identifier}' not found in historical data or has no usage data for the selected department!")
+
+elif view_mode == "Data Overview":
+    # Data overview with improved visualization
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='header'>Data Overview</div>", unsafe_allow_html=True)
+    
+    # Better organized filter options
+    st.markdown("<div class='subheader'>Filter Data</div>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_items = st.multiselect(
+            "Filter by Items",
+            unique_item_names,
+            default=[],
+            help="Select specific items to view their data"
+        )
+    with col2:
+        selected_overview_dept = st.multiselect(
+            "Filter by Departments",
+            unique_departments[1:],  # Exclude "All Departments"
+            default=[],
+            help="Select specific departments to view their data"
+        )
+    
+    # Apply filters
+    filtered_data = data.copy()
+    if selected_items:
+        filtered_data = filtered_data[filtered_data["ITEM NAME"].isin(selected_items)]
+    if selected_overview_dept:
+        filtered_data = filtered_data[filtered_data["DEPARTMENT"].isin(selected_overview_dept)]
+    
+    # Data preview with better styling
+    st.markdown("<div class='subheader'>Data Preview</div>", unsafe_allow_html=True)
+    display_columns = ["DATE", "ITEM NAME", "DEPARTMENT", "QUANTITY", "UNIT_OF_MEASURE"]
+    
+    # Format date column for better display
+    filtered_display = filtered_data[display_columns].copy()
+    filtered_display["DATE"] = filtered_display["DATE"].dt.strftime("%Y-%m-%d")
+    
+    st.dataframe(
+        filtered_display.head(100),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "DATE": st.column_config.DateColumn("Date", help="Transaction date"),
+            "ITEM NAME": st.column_config.TextColumn("Item Name", help="Name of the item"),
+            "DEPARTMENT": st.column_config.TextColumn("Department", help="Department that used the item"),
+            "QUANTITY": st.column_config.NumberColumn("Quantity", format="%.2f", help="Quantity used"),
+            "UNIT_OF_MEASURE": st.column_config.TextColumn("Unit", help="Unit of measurement")
+        }
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Enhanced statistics visualization
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("<div class='header'>Usage Analytics</div>", unsafe_allow_html=True)
+    
+    if filtered_data.empty:
+        st.info("Select items or departments to view usage analytics")
+    else:
+        total_usage = filtered_data["QUANTITY"].sum()
+        unique_items_count = filtered_data["ITEM NAME"].nunique()
+        date_range = f"{filtered_data['DATE'].min().strftime('%b %d, %Y')} to {filtered_data['DATE'].max().strftime('%b %d, %Y')}"
         
-        **Understanding Results:**
-        - The app analyzes historical usage patterns to suggest optimal allocations
-        - Departments that would receive very small amounts are handled based on the minimum threshold setting
-        - Visualizations help you understand both historical patterns and proposed allocations
+        # Metrics with better visual presentation
+        stat_cols = st.columns(4)
+        with stat_cols[0]:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"<div class='metric-value'>{total_usage:,.2f}</div>"
+                f"<div class='metric-label'>Total Quantity</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+        with stat_cols[1]:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"<div class='metric-value'>{unique_items_count}</div>"
+                f"<div class='metric-label'>Unique Items</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+        with stat_cols[2]:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"<div class='metric-value'>{len(filtered_data):,}</div>"
+                f"<div class='metric-label'>Transactions</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+        with stat_cols[3]:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"<div class='metric-value'>{filtered_data['DEPARTMENT'].nunique()}</div>"
+                f"<div class='metric-label'>Departments</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
         
-        **Need more help?** Contact data-team@browns.com
-        """)
+        # Time range info
+        st.info(f"Data shown for period: {date_range}")
+        
+        # Multiple visualizations using tabs
+        chart_tab1, chart_tab2, chart_tab3 = st.tabs(["🥧 Department Distribution", "📈 Usage Trends", "🔝 Top Items"])
+        
+        with chart_tab1:
+    # Department distribution pie chart
+    dept_usage = filtered_data.groupby("DEPARTMENT")["QUANTITY"].sum().reset_index()
+    fig1 = px.pie(
+        dept_usage,
+        values="QUANTITY",
+        names="DEPARTMENT",
+        title="Usage Distribution by Department",
+        hole=0.4,
+        color_discrete_sequence=px.colors.qualitative.Bold
+    )
+    fig1.update_layout(
+        title_font=dict(size=18),
+        title_x=0.5,
+        legend_title_text="",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+with chart_tab2:
+    # Monthly usage trend line chart
+    filtered_data["Month"] = filtered_data["DATE"].dt.strftime("%Y-%m")
+    monthly_usage = filtered_data.groupby("Month")["QUANTITY"].sum().reset_index()
+    monthly_usage = monthly_usage.sort_values("Month")
+    
+    fig2 = px.line(
+        monthly_usage,
+        x="Month",
+        y="QUANTITY",
+        title="Monthly Usage Trend",
+        markers=True,
+        line_shape="spline",
+        color_discrete_sequence=["#3B82F6"]
+    )
+    fig2.update_layout(
+        title_font=dict(size=18),
+        title_x=0.5,
+        xaxis_title="Month",
+        yaxis_title="Total Quantity",
+        xaxis=dict(tickangle=45)
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+with chart_tab3:
+    # Top items by quantity
+    item_usage = filtered_data.groupby("ITEM NAME")["QUANTITY"].sum().reset_index()
+    top_items = item_usage.sort_values("QUANTITY", ascending=False).head(10)
+    
+    fig3 = px.bar(
+        top_items,
+        x="QUANTITY",
+        y="ITEM NAME",
+        orientation="h",
+        title="Top 10 Items by Usage",
+        color="QUANTITY",
+        color_continuous_scale="Blues",
+        text="QUANTITY"
+    )
+    fig3.update_layout(
+        title_font=dict(size=18),
+        title_x=0.5,
+        yaxis=dict(title="", autorange="reversed"),
+        xaxis_title="Total Quantity"
+    )
+    fig3.update_traces(
+        texttemplate="%{x:.1f}",
+        textposition="outside"
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+
+# End of chart tabs
+st.markdown("</div>", unsafe_allow_html=True)
+
+# Footer
+st.markdown(
+    """
+    <div class='footer'>
+        <p>SPP Ingredients Allocation App | Developed by Brown's Data Team</p>
+        <p>Version 1.0 | Last Updated: March 2025</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
