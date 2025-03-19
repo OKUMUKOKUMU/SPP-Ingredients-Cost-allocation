@@ -738,23 +738,21 @@ elif view_mode == "Data Overview":
         # Multiple visualizations using tabs
         chart_tab1, chart_tab2, chart_tab3 = st.tabs(["🥧 Department Distribution", "📈 Usage Trends", "🔝 Top Items"])
         with chart_tab1:
-    # Department distribution pie chart
-    dept_usage = filtered_data.groupby("DEPARTMENT")["QUANTITY"].sum().reset_index()
-    fig1 = px.pie(
-        dept_usage,
-        values="QUANTITY",
-        names="DEPARTMENT",
-        title="Usage Distribution by Department",
-        hole=0.4,
-        color_discrete_sequence=px.colors.qualitative.Bold
-    )
-    fig1.update_layout(
-        title_font=dict(size=18),
-        title_x=0.5,
-        legend_title_text="",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
-    )
-    st.plotly_chart(fig1, use_container_width=True)
+            dept_usage = filtered_data.groupby("DEPARTMENT")["QUANTITY"].sum().reset_index()
+            fig1 = px.pie(
+                dept_usage,
+                values="QUANTITY",
+                names="DEPARTMENT",
+                title="Usage Distribution by Department",
+                hole=0.4,
+                color_discrete_sequence=px.colors.qualitative.Bold)
+            fig1.update_layout(
+                title_font=dict(size=18),
+                title_x=0.5,
+                legend_title_text="",
+                legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+            )
+            st.plotly_chart(fig1, use_container_width=True)
 
 with chart_tab2:
     # Monthly usage trend line chart
