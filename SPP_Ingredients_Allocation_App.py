@@ -5,6 +5,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from dotenv import load_dotenv
 import os
 from datetime import datetime
+import plotly.express as px
 
 # Load environment variables
 load_dotenv()
@@ -42,7 +43,7 @@ def connect_to_gsheet(spreadsheet_name, sheet_name):
 
 def load_data_from_google_sheet():
     """
-    Load data from Google Sheets.
+    Load data from Google Sheets with duplicate header handling.
     """
     with st.spinner("Loading data from Google Sheets..."):
         try:
@@ -50,21 +51,100 @@ def load_data_from_google_sheet():
             if worksheet is None:
                 return None
             
-            # Get all records from the Google Sheet
-            data = worksheet.get_all_records()
+            # Get all values from the Google Sheet
+            all_values = worksheet.get_all_values()
             
-            if not data:
+            if not all_values or len(all_values) <= 1:  # Only headers or empty
                 st.error("No data found in the Google Sheet.")
                 return None
-
-            # Convert data to DataFrame
-            df = pd.DataFrame(data)
-
-            # Ensure columns match the updated Google Sheets structure
-            df.columns = ["DATE", "ITEM_SERIAL", "ITEM NAME", "DEPARTMENT", "ISSUED_TO", "QUANTITY", 
-                        "UNIT_OF_MEASURE", "ITEM_CATEGORY", "WEEK", "REFERENCE", 
-                        "DEPARTMENT_CAT", "BATCH NO.", "STORE", "RECEIVED BY"]
-
+            
+            # Get headers (first row)
+            headers = all_values[0]
+            
+            # Check for duplicate headers and make them unique
+            seen = {}
+            unique_headers = []
+            for header in headers:
+                if header in seen:
+                    seen[header] += 1
+                    unique_headers.append(f"{header}_{seen[header]}")
+                else:
+                    seen[header] = 1
+                    unique_headers.append(header)
+            
+            # Create DataFrame with unique headers
+            data_rows = all_values[1:]
+            df = pd.DataFrame(data_rows, columns=unique_headers)
+            
+            # Map columns to expected names (case-insensitive and flexible)
+            column_mapping = {}
+            
+            # Define flexible column name patterns
+            column_patterns = {
+                "DATE": ["date", "DATE", "Date"],
+                "ITEM_SERIAL": ["serial", "item serial", "item_serial", "ITEM SERIAL", "ITEM_SERIAL", "Item Serial", "id", "ID"],
+                "ITEM NAME": ["item name", "ITEM NAME", "Item Name", "item", "ITEM", "Item", "product", "PRODUCT", "Product", "ingredient", "INGREDIENT"],
+                "DEPARTMENT": ["department", "DEPARTMENT", "Department", "dept", "DEPT", "Dept"],
+                "ISSUED_TO": ["issued to", "ISSUED TO", "Issued To", "issued_to", "ISSUED_TO", "issued", "ISSUED"],
+                "QUANTITY": ["quantity", "QUANTITY", "Quantity", "qty", "QTY", "Qty", "amount", "AMOUNT"],
+                "UNIT_OF_MEASURE": ["unit", "UNIT", "Unit", "uom", "UOM", "unit of measure", "UNIT OF MEASURE", "measure", "MEASURE"],
+                "ITEM_CATEGORY": ["category", "CATEGORY", "Category", "item category", "ITEM CATEGORY"],
+                "WEEK": ["week", "WEEK", "Week"],
+                "REFERENCE": ["reference", "REFERENCE", "Reference", "ref", "REF"],
+                "DEPARTMENT_CAT": ["department category", "DEPARTMENT CATEGORY", "dept category", "DEPT CATEGORY"],
+                "BATCH NO.": ["batch", "BATCH", "Batch", "batch no", "BATCH NO", "lot", "LOT", "batch no."],
+                "STORE": ["store", "STORE", "Store", "storage", "STORAGE"],
+                "RECEIVED BY": ["received by", "RECEIVED BY", "Received By", "receiver", "RECEIVER", "received_by"]
+            }
+            
+            # Try to map each expected column
+            final_columns = []
+            for expected_col in [
+                "DATE", "ITEM_SERIAL", "ITEM NAME", "DEPARTMENT", "ISSUED_TO", 
+                "QUANTITY", "UNIT_OF_MEASURE", "ITEM_CATEGORY", "WEEK", "REFERENCE", 
+                "DEPARTMENT_CAT", "BATCH NO.", "STORE", "RECEIVED BY"
+            ]:
+                found = False
+                # Check all possible patterns
+                for pattern in column_patterns[expected_col]:
+                    for actual_col in unique_headers:
+                        if pattern.lower() == actual_col.lower().strip():
+                            column_mapping[actual_col] = expected_col
+                            found = True
+                            break
+                    if found:
+                        break
+                
+                # If still not found, try partial matching
+                if not found:
+                    for actual_col in unique_headers:
+                        actual_lower = actual_col.lower().strip()
+                        # Check if any pattern is in the actual column name
+                        for pattern in column_patterns[expected_col]:
+                            if pattern.lower() in actual_lower:
+                                column_mapping[actual_col] = expected_col
+                                found = True
+                                break
+                        if found:
+                            break
+                
+                if not found:
+                    # Add as empty column
+                    df[expected_col] = None
+                
+                final_columns.append(expected_col)
+            
+            # Rename columns based on mapping
+            df = df.rename(columns=column_mapping)
+            
+            # Ensure we have all expected columns
+            for col in final_columns:
+                if col not in df.columns:
+                    df[col] = None
+            
+            # Select only the columns we need
+            df = df[final_columns]
+            
             # Convert date and numeric columns
             df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
             df["QUANTITY"] = pd.to_numeric(df["QUANTITY"], errors="coerce")
@@ -78,6 +158,7 @@ def load_data_from_google_sheet():
             df = df[df["DATE"].dt.year >= current_year - 1]  # Data from last year onwards
 
             return df
+            
         except Exception as e:
             st.error(f"Error loading data: {e}")
             return None
@@ -149,6 +230,7 @@ def allocate_quantity(df, identifier, available_quantity, department=None):
     """
     Allocate quantity based on historical proportions at department level only.
     Filters out departments with less than 1% proportion.
+    Ensures total allocation exactly matches available quantity.
     """
     proportions = calculate_proportion(df, identifier, department, min_proportion=1.0)
     if proportions is None:
@@ -157,19 +239,69 @@ def allocate_quantity(df, identifier, available_quantity, department=None):
     # Calculate allocated quantity for each department based on their proportion
     proportions["ALLOCATED_QUANTITY"] = (proportions["PROPORTION"] / 100) * available_quantity
     
-    # Round allocated quantities
-    proportions["ALLOCATED_QUANTITY"] = proportions["ALLOCATED_QUANTITY"].round(0)
+    # First calculate the sum of the non-rounded values
+    total_unrounded = proportions["ALLOCATED_QUANTITY"].sum()
     
-    # Ensure the sum matches the available quantity exactly
+    # Round allocated quantities to integers
+    proportions["ALLOCATED_QUANTITY"] = proportions["ALLOCATED_QUANTITY"].round(0).astype(int)
+    
+    # Get the total after rounding
     allocated_sum = proportions["ALLOCATED_QUANTITY"].sum()
-    if abs(allocated_sum - available_quantity) > 0.01 and len(proportions) > 0:  # Allow small rounding error
+    
+    # Adjust to ensure we match exactly the available quantity
+    if allocated_sum != available_quantity:
         difference = int(available_quantity - allocated_sum)
-        if difference != 0:
-            # Add/subtract the difference from the largest allocation
-            index_max = proportions["ALLOCATED_QUANTITY"].idxmax()
-            proportions.at[index_max, "ALLOCATED_QUANTITY"] += difference
+        
+        if difference > 0:
+            # Need to add some units - add to departments with largest fractional parts
+            # Sort by fractional part (descending)
+            fractional_parts = (proportions["PROPORTION"] / 100) * available_quantity - proportions["ALLOCATED_QUANTITY"]
+            indices = fractional_parts.sort_values(ascending=False).index[:difference].tolist()
+            for idx in indices:
+                proportions.at[idx, "ALLOCATED_QUANTITY"] += 1
+        elif difference < 0:
+            # Need to subtract some units - remove from departments with smallest fractional parts
+            # Sort by fractional part (ascending)
+            fractional_parts = (proportions["PROPORTION"] / 100) * available_quantity - (proportions["ALLOCATED_QUANTITY"] - 1)
+            indices = fractional_parts.sort_values(ascending=True).index[:-difference].tolist()
+            for idx in indices:
+                proportions.at[idx, "ALLOCATED_QUANTITY"] -= 1
+    
+    # Verify once more that the sum matches the available quantity exactly
+    final_sum = proportions["ALLOCATED_QUANTITY"].sum()
+    assert final_sum == available_quantity, f"Allocation error: {final_sum} != {available_quantity}"
     
     return proportions
+
+def generate_allocation_chart(result_df, item_name):
+    """
+    Generate a bar chart for allocation results.
+    """
+    # Create a summarized version for charting (by DEPARTMENT only)
+    chart_df = result_df.copy()
+    
+    # Create a bar chart
+    fig = px.bar(
+        chart_df, 
+        x="DEPARTMENT", 
+        y="ALLOCATED_QUANTITY",
+        text="ALLOCATED_QUANTITY",
+        title=f"Allocation for {item_name} by Department",
+        labels={
+            "DEPARTMENT": "Department",
+            "ALLOCATED_QUANTITY": "Allocated Quantity"
+        },
+        height=400,
+        color_discrete_sequence=px.colors.qualitative.Vivid
+    )
+    
+    # Customize the layout
+    fig.update_layout(
+        xaxis_title="Department",
+        yaxis_title="Allocated Quantity"
+    )
+    
+    return fig
 
 # Streamlit UI
 st.set_page_config(
@@ -178,22 +310,21 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for improved appearance
 st.markdown("""
     <style>
     .title {
         text-align: center;
-        font-size: 36px;
+        font-size: 32px;
         font-weight: bold;
-        color: #2E86C1;
-        font-family: 'Arial', sans-serif;
-        margin-bottom: 10px;
+        color: #FFC300;
+        font-family: 'Amasis MT Pro', Arial, sans-serif;
+        margin-bottom: 5px;
     }
     .subtitle {
         text-align: center;
-        font-size: 18px;
+        font-size: 16px;
         color: #6c757d;
-        margin-bottom: 30px;
+        margin-bottom: 20px;
     }
     .footer {
         text-align: center;
@@ -202,35 +333,28 @@ st.markdown("""
         margin-top: 30px;
     }
     .stButton button {
-        background-color: #2E86C1;
+        background-color: #FFC300;
         color: white;
         font-weight: bold;
-        border-radius: 5px;
-        padding: 10px 20px;
     }
     .stButton button:hover {
-        background-color: #1C6EA4;
+        background-color: #E6B000;
+    }
+    .result-header {
+        background-color: #f8f9fa;
+        padding: 8px;
+        border-radius: 5px;
+        margin-bottom: 8px;
     }
     .card {
         background-color: #ffffff;
         border-radius: 10px;
-        padding: 20px;
+        padding: 15px;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        margin-bottom: 20px;
-    }
-    .stDataFrame {
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    }
-    .stSelectbox, .stNumberInput, .stMultiselect {
         margin-bottom: 15px;
     }
     </style>
 """, unsafe_allow_html=True)
-
-# Main title and subtitle
-st.markdown("<h1 class='title'>SPP Ingredients Allocation App</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>Quickly allocate ingredients based on historical usage</p>", unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
@@ -249,9 +373,31 @@ with st.sidebar:
     
     if data is None:
         st.error("Failed to load data from Google Sheets. Please check your connection and credentials.")
+        
+        # Debug option
+        if st.button("Debug Sheet Structure"):
+            try:
+                worksheet = connect_to_gsheet(SPREADSHEET_NAME, SHEET_NAME)
+                if worksheet:
+                    all_values = worksheet.get_all_values()
+                    if all_values:
+                        st.write("**Sheet headers:**")
+                        headers = all_values[0]
+                        for i, header in enumerate(headers, 1):
+                            st.write(f"{i}. '{header}'")
+                        
+                        # Check for duplicates
+                        from collections import Counter
+                        dup_counts = Counter(headers)
+                        duplicates = {k: v for k, v in dup_counts.items() if v > 1}
+                        if duplicates:
+                            st.warning(f"Duplicate headers found: {duplicates}")
+            except Exception as e:
+                st.error(f"Debug error: {e}")
+        
         st.stop()
     
-    # Extract unique item names and departments for filtering
+    # Extract unique item names and departments for auto-suggestions
     unique_item_names = sorted(data["ITEM NAME"].unique().tolist())
     unique_departments = sorted(["All Departments"] + data["DEPARTMENT"].unique().tolist())
     
@@ -265,68 +411,143 @@ with st.sidebar:
         st.success("Data refreshed successfully!")
     
     st.markdown("---")
+    st.markdown("### View Options")
+    view_mode = st.radio("Select View", ["Allocation Calculator", "Data Overview"])
+    
+    st.markdown("---")
     st.markdown("<p class='footer'>Developed by Brown's Data Team, ©2025</p>", unsafe_allow_html=True)
 
 # Main content
-st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("### Quick Allocation Tool")
+st.markdown("<h1 class='title'>SPP Ingredients Allocation App</h1>", unsafe_allow_html=True)
 
-with st.form("allocation_form"):
-    num_items = st.number_input("Number of items to allocate", min_value=1, max_value=10, step=1, value=1)
+if view_mode == "Allocation Calculator":
+    # Form Layout for Better UX
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("### Enter Items and Quantities")
     
-    # Department selection
-    selected_department = st.selectbox("Filter by Department (optional)", unique_departments)
+    with st.form("allocation_form"):
+        num_items = st.number_input("Number of items to allocate", min_value=1, max_value=10, step=1, value=1)
+        
+        # Department selection
+        selected_department = st.selectbox("Filter by Department (optional)", unique_departments)
 
-    entries = []
-    for i in range(num_items):
-        st.markdown(f"**Item {i+1}**")
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            identifier = st.selectbox(f"Select item {i+1}", unique_item_names, key=f"item_{i}")
-        with col2:
-            available_quantity = st.number_input(f"Quantity:", min_value=0.1, step=0.1, key=f"qty_{i}")
+        entries = []
+        for i in range(num_items):
+            st.markdown(f"**Item {i+1}**")
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                identifier = st.selectbox(f"Select item {i+1}", unique_item_names, key=f"item_{i}")
+            with col2:
+                available_quantity = st.number_input(f"Quantity:", min_value=0.1, step=0.1, key=f"qty_{i}")
 
-        if identifier and available_quantity > 0:
-            entries.append((identifier, available_quantity))
+            if identifier and available_quantity > 0:
+                entries.append((identifier, available_quantity))
 
-    submitted = st.form_submit_button("Calculate Allocation")
-st.markdown("</div>", unsafe_allow_html=True)
+        submitted = st.form_submit_button("Calculate Allocation")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# Processing Allocation
-if submitted:
-    if not entries:
-        st.warning("Please enter at least one valid item and quantity!")
-    else:
-        for identifier, available_quantity in entries:
-            result = allocate_quantity(data, identifier, available_quantity, selected_department)
-            if result is not None:
-                st.markdown("<div class='card'>", unsafe_allow_html=True)
-                st.markdown(f"<h3 style='color: #2E86C1;'>Allocation for {identifier}</h3>", unsafe_allow_html=True)
-                
-                # Format the output for better readability
-                formatted_result = result[["DEPARTMENT", "PROPORTION", "ALLOCATED_QUANTITY"]].copy()
-                formatted_result = formatted_result.rename(columns={
-                    "DEPARTMENT": "Department",
-                    "PROPORTION": "Proportion (%)",
-                    "ALLOCATED_QUANTITY": "Allocated Quantity"
-                })
-                
-                # Format numeric columns
-                formatted_result["Proportion (%)"] = formatted_result["Proportion (%)"].round(2)
-                formatted_result["Allocated Quantity"] = formatted_result["Allocated Quantity"].astype(int)
-                
-                # Display the result
-                st.dataframe(formatted_result, use_container_width=True)
-                
-                # Add a download button for the result
-                csv = formatted_result.to_csv(index=False)
-                st.download_button(
-                    label="Download Allocation as CSV",
-                    data=csv,
-                    file_name=f"{identifier}_allocation.csv",
-                    mime="text/csv",
-                )
-                
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.error(f"Item {identifier} not found in historical data or has no usage data for the selected department!")
+    # Processing Allocation
+    if submitted:
+        if not entries:
+            st.warning("Please enter at least one valid item and quantity!")
+        else:
+            for identifier, available_quantity in entries:
+                result = allocate_quantity(data, identifier, available_quantity, selected_department)
+                if result is not None:
+                    st.markdown("<div class='card'>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='result-header'><h3 style='color: #2E86C1;'>Allocation for {identifier}</h3></div>", unsafe_allow_html=True)
+                    
+                    # Format the output for better readability
+                    # Select and rename columns for display
+                    formatted_result = result[["DEPARTMENT", "PROPORTION", "ALLOCATED_QUANTITY"]].copy()
+                    formatted_result = formatted_result.rename(columns={
+                        "DEPARTMENT": "Department",
+                        "PROPORTION": "Proportion (%)",
+                        "ALLOCATED_QUANTITY": "Allocated Quantity"
+                    })
+                    
+                    # Format numeric columns
+                    formatted_result["Proportion (%)"] = formatted_result["Proportion (%)"].round(2)
+                    formatted_result["Allocated Quantity"] = formatted_result["Allocated Quantity"].astype(int)
+                    
+                    # Display the result
+                    st.dataframe(formatted_result, use_container_width=True)
+                    
+                    # Summary statistics
+                    st.markdown("#### Allocation Summary")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Total Allocated", f"{formatted_result['Allocated Quantity'].sum():,.0f}")
+                    with col2:
+                        st.metric("Departments", f"{formatted_result['Department'].nunique()}")
+                    
+                    # Add a download button for the result
+                    csv = formatted_result.to_csv(index=False)
+                    st.download_button(
+                        label="Download Allocation as CSV",
+                        data=csv,
+                        file_name=f"{identifier}_allocation.csv",
+                        mime="text/csv",
+                    )
+                    
+                    # Show visualization
+                    chart = generate_allocation_chart(result, identifier)
+                    st.plotly_chart(chart, use_container_width=True)
+                    
+                    st.markdown("</div>", unsafe_allow_html=True)
+                else:
+                    st.error(f"Item {identifier} not found in historical data or has no usage data for the selected department!")
+
+elif view_mode == "Data Overview":
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("### Data Overview")
+    
+    # Filter options
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_items = st.multiselect("Filter by Items", unique_item_names, default=[])
+    with col2:
+        selected_overview_dept = st.multiselect("Filter by Departments", unique_departments[1:], default=[])  # Exclude "All Departments"
+    
+    # Apply filters
+    filtered_data = data.copy()
+    if selected_items:
+        filtered_data = filtered_data[filtered_data["ITEM NAME"].isin(selected_items)]
+    if selected_overview_dept:
+        filtered_data = filtered_data[filtered_data["DEPARTMENT"].isin(selected_overview_dept)]
+    
+    # Show data overview
+    st.markdown("#### Filtered Data Preview")
+    display_columns = ["DATE", "ITEM NAME", "DEPARTMENT", "QUANTITY", "UNIT_OF_MEASURE"]
+    st.dataframe(filtered_data[display_columns].head(100), use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Simple statistics
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.markdown("#### Usage Statistics")
+    total_usage = filtered_data["QUANTITY"].sum()
+    unique_items_count = filtered_data["ITEM NAME"].nunique()
+    
+    stat_col1, stat_col2, stat_col3 = st.columns(3)
+    with stat_col1:
+        st.metric("Total Quantity Used", f"{total_usage:,.2f}")
+    with stat_col2:
+        st.metric("Unique Items", f"{unique_items_count}")
+    with stat_col3:
+        st.metric("Total Transactions", f"{len(filtered_data):,}")
+    
+    # Usage by department visualization
+    if not filtered_data.empty:
+        st.markdown("#### Department Usage")
+        dept_usage = filtered_data.groupby("DEPARTMENT")["QUANTITY"].sum().reset_index()
+        dept_usage.sort_values(by="QUANTITY", ascending=False, inplace=True)
+        
+        fig = px.pie(
+            dept_usage, 
+            values="QUANTITY", 
+            names="DEPARTMENT", 
+            title="Usage Distribution by Department",
+            hole=0.4
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
